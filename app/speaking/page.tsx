@@ -3,6 +3,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Header from '../components/Header';
 import Footer from '../components/Footer';
+import RecordRTC from 'recordrtc';
+
 declare const window: any;
 
 const SpeakingPage = () => {
@@ -16,16 +18,19 @@ const SpeakingPage = () => {
     const [fluency, setFluency] = useState('');
     const [taskType, setTaskType] = useState<number | null>(null);
     const [timeLeft, setTimeLeft] = useState(120); // 2 minutes countdown for Task 2
+    const [records, setRecords] = useState<any[]>([]); // State to store past records
     const recognitionRef = useRef<any>(null);
     const startTimeRef = useRef<number | null>(null);
     const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null);
+    const mediaRecorderRef = useRef<RecordRTC | null>(null);
+    const audioBlobRef = useRef<Blob | null>(null);
 
     const getRandomPrompt = (task: number) => {
         const taskMessages: { [key: number]: string } = {
             1: "Give me about 7 words speaking prompt for IELTS Speaking Task 1 without bold, highlighted text or special start character",
-            2: "Give me a speaking prompt for IELTS Speaking Task 2 without bold, highlighted text or special start character",
-            3: "Give me a speaking prompt for IELTS Speaking Task 3 without bold, highlighted text or special start character",
-            4: "Give me a speaking prompt for IELTS Speaking Task 4 without bold, highlighted text or special start character"
+            2: "Give me about 15 words speaking prompt for IELTS Speaking Task 2 without bold, highlighted text or special start character",
+            3: "Give me about 20 words speaking prompt for IELTS Speaking Task 3 without bold, highlighted text or special start character",
+            4: "Give me about 25 words speaking prompt for IELTS Speaking Task 4 without bold, highlighted text or special start character"
         };
 
         setTaskType(task);
@@ -64,6 +69,21 @@ const SpeakingPage = () => {
         return () => clearTimeout(timer);
     }, [timeLeft, isLoading, taskType]);
 
+    useEffect(() => {
+        const savedRecords = JSON.parse(localStorage.getItem('speakingRecords') || '[]');
+        if (Array.isArray(savedRecords)) {
+            setRecords(savedRecords);
+        } else {
+            console.error('Records retrieved from localStorage are not an array:', savedRecords);
+        }
+    }, []);
+
+    const handleSaveRecord = () => {
+        if (rating && feedback && wordsPerMinute && fluency) {
+            saveRecord(transcript, prompt, audioBlobRef.current, rating, feedback, wordsPerMinute, fluency);
+        }
+    };
+
     const rateTranscript = (transcript: string, prompt: string) => {
         fetch("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",
@@ -74,7 +94,7 @@ const SpeakingPage = () => {
             body: JSON.stringify({
                 "model": "openai/gpt-4o",
                 "messages": [
-                    { "role": "user", "content": `Rate the following transcript based on the IELTS Speaking band without Fluency and Coherance rating start with band score on the first line and without bold, highlighted text. Prompt: "${prompt}". Transcript: "${transcript}"` },
+                    { "role": "user", "content": `Rate the following transcript based on the IELTS Speaking band without asterick character in returned rating, then each part of the returned rating start with an hyphen, with overall band score on the first line start with "- Overall Speaking Band Score: ". Prompt: "${prompt}". Transcript: "${transcript}"` },
                 ],
             })
         })
@@ -82,6 +102,7 @@ const SpeakingPage = () => {
         .then(data => {
             const messageContent = data.choices[0].message.content;
             setRating(messageContent);
+            checkRecordingCompletion(); // Check if recording completion tasks are done
         })
         .catch(error => {
             console.error('Error:', error);
@@ -99,7 +120,7 @@ const SpeakingPage = () => {
             body: JSON.stringify({
                 "model": "openai/gpt-4o",
                 "messages": [
-                    { "role": "user", "content": `Give feedback for improvement based on the IELTS Speaking band without Fluency and Coherance feedback, with each part start with an dash and without bold, highlighted text. Prompt: "${prompt}". Transcript: "${transcript}"` },
+                    { "role": "user", "content": `Give feedback for improvement and an short example answer script based on the IELTS Speaking band without Fluency, Coherance feedback, without asterick character in returned feedback, then each part of the returned feedback start with an hyphen. Prompt: "${prompt}". Transcript: "${transcript}"` },
                 ],
             })
         })
@@ -107,11 +128,18 @@ const SpeakingPage = () => {
         .then(data => {
             const messageContent = data.choices[0].message.content;
             setFeedback(messageContent);
+            checkRecordingCompletion(); // Check if recording completion tasks are done
         })
         .catch(error => {
             console.error('Error:', error);
             setError('An error occurred while getting feedback.');
         });
+    };
+
+    const checkRecordingCompletion = () => {
+        if (rating && feedback) {
+            handleSaveRecord();
+        }
     };
 
     const startSpeechRecognition = () => {
@@ -154,144 +182,178 @@ const SpeakingPage = () => {
         recognition.onend = () => {
             setIsLoading(false);
             calculateWordsPerMinute(); // Calculate words per minute when recognition ends
+            rateTranscript(transcript, prompt); // Rate the transcript after stopping
+            getFeedback(transcript, prompt); // Get feedback after stopping
         };
 
         recognition.start();
+
+        // Start audio recording
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            const mediaRecorder = new RecordRTC(stream, {
+                type: 'audio',
+                mimeType: 'audio/wav',
+                recorderType: RecordRTC.StereoAudioRecorder,
+                desiredSampRate: 16000,
+            });
+            mediaRecorderRef.current = mediaRecorder;
+            mediaRecorder.startRecording();
+        }).catch(error => {
+            console.error('Error accessing media devices:', error);
+            setError('An error occurred while accessing media devices.');
+            setIsLoading(false);
+        });
     };
 
     const stopSpeechRecognition = () => {
+        setIsLoading(false);
         if (recognitionRef.current) {
             recognitionRef.current.stop();
-            setIsLoading(false);
-            rateTranscript(transcript, prompt); // Rate the transcript after stopping
-            getFeedback(transcript, prompt); // Get feedback after stopping
-            calculateWordsPerMinute(); // Calculate words per minute when stopping
+        }
+        if (mediaRecorderRef.current) {
+            mediaRecorderRef.current.stopRecording(() => {
+                const audioBlob = mediaRecorderRef.current!.getBlob();
+                audioBlobRef.current = audioBlob; // Save the audio blob to a ref for later use
+            });
         }
     };
 
     const calculateWordsPerMinute = () => {
-        if (startTimeRef.current) {
-            const endTime = Date.now();
-            const durationInMinutes = (endTime - startTimeRef.current) / 60000;
-            const wordCount = transcript.trim().split(/\s+/).length;
-            const wpm = wordCount / durationInMinutes;
-            setWordsPerMinute(wpm);
-            startTimeRef.current = null; // Reset start time
-
-            if (wpm >= 90) setFluency('Fluency Tier A');
-            else if (wpm >= 70) setFluency('Fluency Tier B');
-            else if (wpm >= 50) setFluency('Fluency Tier C');
-            else if (wpm >= 30) setFluency('Fluency Tier D');
-            else if (wpm >= 10) setFluency('Fluency Tier E');
-            else setFluency('Fluency Tier F');
-        }
+        const words = transcript.trim().split(/\s+/).length;
+        const durationInMinutes = (Date.now() - (startTimeRef.current || Date.now())) / 1000 / 60;
+        const wpm = Math.round(words / durationInMinutes);
+        setWordsPerMinute(wpm);
+        setFluency(wpm > 100 ? 'Fast' : wpm < 70 ? 'Slow' : 'Normal');
     };
 
-    const startSpeech = () => {
-        if (!prompt) return;
-
-        const utterance = new SpeechSynthesisUtterance(prompt);
-        utterance.lang = 'en-US';
-
-        utterance.onend = () => {
-            console.log('Speech synthesis finished.');
+    const saveRecord = (transcript: string, prompt: string, audioBlob: Blob | null, rating: string, feedback: string, wpm: number, fluency: string) => {
+        const newRecord = {
+            id: Date.now(),
+            transcript,
+            prompt,
+            audioURL: audioBlob ? URL.createObjectURL(audioBlob) : null,
+            rating,
+            feedback,
+            wpm,
+            fluency,
+            recordedTime: new Date().toLocaleString() // Add recorded time
         };
 
-        speechSynthesisRef.current = utterance;
-        window.speechSynthesis.speak(utterance);
+        const updatedRecords = [...records, newRecord];
+        setRecords(updatedRecords);
+        localStorage.setItem('speakingRecords', JSON.stringify(updatedRecords));
     };
 
-    const stopSpeech = () => {
-        if (speechSynthesisRef.current) {
-            window.speechSynthesis.cancel();
+    const clearPastRecords = () => {
+        setRecords([]);
+        localStorage.removeItem('speakingRecords');
+    };
+
+    const [expandedRecords, setExpandedRecords] = useState<number[]>([]);
+
+    const toggleRecordExpansion = (recordId: number) => {
+        setExpandedRecords((prevExpandedRecords) =>
+            prevExpandedRecords.includes(recordId)
+                ? prevExpandedRecords.filter((id) => id !== recordId)
+                : [...prevExpandedRecords, recordId]
+        );
+    };
+
+    const renderRecordText = (text: string, recordId: number) => {
+        const isExpanded = expandedRecords.includes(recordId);
+        const limit = 50;
+        if (text.length <= limit) {
+            return text;
         }
+        return (
+            <span>
+                {isExpanded ? text : `${text.slice(0, limit)}...`}
+                <button onClick={() => toggleRecordExpansion(recordId)} className="ml-2 text-blue-500 hover:underline">
+                    {isExpanded ? 'See Less' : 'See More'}
+                </button>
+            </span>
+        );
     };
 
     return (
-        <div className="flex flex-col min-h-screen bg-gradient-to-b from-blue-100 to-blue-50">
+        <div>
             <Header />
-            <div className="flex-grow container mx-auto px-4 py-8">
-                <h1 className="text-4xl font-bold text-center text-gray-800 mb-8">IELTS Speaking Practice</h1>
-                <div className="w-full max-w-4xl mx-auto bg-white p-8 md:p-16 rounded-3xl shadow-2xl text-center">
-                    <div className="grid grid-cols-2 gap-6 mb-8">
-                        {[1, 2, 3, 4].map(task => (
-                            <div
-                                key={task}
-                                className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg cursor-pointer transition duration-300 transform hover:scale-105"
-                                onClick={() => getRandomPrompt(task)}
-                            >
-                                Task {task}
-                            </div>
-                        ))}
-                    </div>
-                    {prompt && (
-                        <div className="mb-6">
-                            <p className="text-xl text-gray-700">{prompt}</p>
-                            <div className="flex justify-center mt-4">
-                                <button
-                                    className="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded mx-2 transition duration-300 transform hover:scale-105"
-                                    onClick={startSpeech}
-                                >
-                                    Start Speech
-                                </button>
-                                <button
-                                    className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded mx-2 transition duration-300 transform hover:scale-105"
-                                    onClick={stopSpeech}
-                                >
-                                    Stop Speech
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                    <div className="flex flex-col items-center">
-                        <p className="mb-4 text-lg text-gray-600">Status: {isLoading ? 'Recording...' : 'Idle'}</p>
-                        <button
-                            className={`bg-${isLoading ? 'gray' : 'green'}-500 hover:bg-${isLoading ? 'gray' : 'green'}-700 text-white font-bold py-2 px-4 rounded mb-4 transition duration-300 transform hover:scale-105`}
-                            onClick={startSpeechRecognition}
-                            disabled={isLoading}
-                        >
-                            {isLoading ? 'Recording...' : 'Start Recording'}
-                        </button>
-                        {isLoading && taskType === 2 && (
-                            <p className="text-lg text-red-600 mb-4">Time Left: {timeLeft} seconds</p>
-                        )}
-                        {isLoading && (
-                            <button
-                                className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded mb-4 transition duration-300 transform hover:scale-105"
-                                onClick={stopSpeechRecognition}
-                            >
-                                Stop Recording
-                            </button>
-                        )}
-                        {transcript && (
-                            <div className="flex flex-row mt-4 space-x-4">
-                                <div className="bg-gray-100 p-4 rounded shadow-inner w-1/2">
-                                    <h2 className="text-lg font-bold mb-2">Transcript</h2>
-                                    <p className="text-left text-gray-700 whitespace-pre-wrap leading-relaxed">{transcript}</p>
-                                </div>
-                                <div className="bg-purple-100 p-4 rounded shadow-inner w-1/2">
-                                    <h2 className="text-lg font-bold mb-2">Words Per Minute</h2>
-                                    <p className="text-left text-gray-700">{wordsPerMinute.toFixed(2)}</p>
-                                    <p className="text-left text-gray-700">{fluency}</p>
-                                </div>
-                            </div>
-                        )}
-                        {rating && (
-                            <div className="mt-4 bg-yellow-100 p-4 rounded shadow-inner">
-                                <h2 className="text-lg font-bold mb-2">IELTS Speaking Band Rating</h2>
-                                <p className="text-left text-gray-700 whitespace-pre-wrap leading-relaxed">{rating}</p>
-                            </div>
-                        )}
-                        {feedback && (
-                            <div className="mt-4 bg-green-100 p-4 rounded shadow-inner">
-                                <h2 className="text-lg font-bold mb-2">Feedback for Improvement</h2>
-                                <p className="text-left text-gray-700 whitespace-pre-wrap leading-relaxed">{feedback}</p>
-                            </div>
-                        )}
-                        {error && <p className="text-red-500">{error}</p>}
-                    </div>
+            <main className="container mx-auto p-4">
+                <h1 className="text-2xl font-bold mb-4">IELTS Speaking Practice</h1>
+                <div className="mb-4">
+                    <button onClick={() => getRandomPrompt(1)} className="mr-2 p-2 bg-blue-500 text-white rounded">Task 1</button>
+                    <button onClick={() => getRandomPrompt(2)} className="mr-2 p-2 bg-blue-500 text-white rounded">Task 2</button>
+                    <button onClick={() => getRandomPrompt(3)} className="mr-2 p-2 bg-blue-500 text-white rounded">Task 3</button>
+                    <button onClick={() => getRandomPrompt(4)} className="p-2 bg-blue-500 text-white rounded">Task 4</button>
                 </div>
-            </div>
+                {prompt && (
+                    <div className="mb-4 p-4 border rounded">
+                        <p className="mb-2"><strong>Prompt:</strong> {prompt}</p>
+                        {taskType === 2 && (
+                            <p className="mb-2"><strong>Time Left:</strong> {timeLeft} seconds</p>
+                        )}
+                        {isLoading ? (
+                            <button onClick={stopSpeechRecognition} className="p-2 bg-red-500 text-white rounded">Stop</button>
+                        ) : (
+                            <button onClick={startSpeechRecognition} className="p-2 bg-green-500 text-white rounded">Start</button>
+                        )}
+                    </div>
+                )}
+                {error && (
+                    <div className="mb-4 p-4 border border-red-500 rounded text-red-500">
+                        {error}
+                    </div>
+                )}
+                <div className="mb-4 p-4 border rounded">
+                    <h2 className="text-xl font-bold mb-2">Transcript</h2>
+                    <p>{transcript}</p>
+                </div>
+                <div className="mb-4 p-4 border rounded">
+                    <h2 className="text-xl font-bold mb-2">Rating</h2>
+                    <pre className="whitespace-pre-wrap">{rating}</pre>
+                </div>
+                <div className="mb-4 p-4 border rounded">
+                    <h2 className="text-xl font-bold mb-2">Feedback</h2>
+                    <pre className="whitespace-pre-wrap">{feedback}</pre>
+                </div>
+                <div className="mb-4 p-4 border rounded">
+                    <h2 className="text-xl font-bold mb-2">Words Per Minute</h2>
+                    <p>{wordsPerMinute}</p>
+                </div>
+                <div className="mb-4 p-4 border rounded">
+                    <h2 className="text-xl font-bold mb-2">Fluency</h2>
+                    <p>{fluency}</p>
+                </div>
+                <div className="mb-4 p-4 border rounded">
+                    <h2 className="text-xl font-bold mb-2">Past Records</h2>
+                    <button onClick={clearPastRecords} className="p-2 bg-red-500 text-white rounded mb-4">Clear Past Records</button>
+                    {Array.isArray(records) ? (
+                        records.length === 0 ? (
+                            <p>No records found.</p>
+                        ) : (
+                            records.map(record => (
+                                <div key={record.id} className="mb-4 p-4 border rounded">
+                                    <p><strong>Recorded Time:</strong> {record.recordedTime}</p> {/* Display recorded time */}
+                                    <p><strong>Prompt:</strong> {record.prompt}</p>
+                                    <p><strong>Transcript:</strong> {record.transcript}</p>
+                                    <p><strong>Rating:</strong> <pre className="whitespace-pre-wrap">{renderRecordText(record.rating, record.id)}</pre></p> {/* Display rating with See More */}
+                                    <p><strong>Feedback:</strong> <pre className="whitespace-pre-wrap">{renderRecordText(record.feedback, record.id)}</pre></p> {/* Display feedback with See More */}
+                                    <p><strong>Words Per Minute:</strong> {record.wpm}</p>
+                                    <p><strong>Fluency:</strong> {record.fluency}</p>
+                                    {record.audioURL && (
+                                        <audio controls>
+                                            <source src={record.audioURL} type="audio/wav" />
+                                            Your browser does not support the audio element.
+                                        </audio>
+                                    )}
+                                </div>
+                            ))
+                        )
+                    ) : (
+                        <p>Error: records is not an array.</p>
+                    )}
+                </div>
+            </main>
             <Footer />
         </div>
     );
